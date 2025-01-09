@@ -3,14 +3,17 @@ import cv2
 import seaborn as sns
 import numpy as np
 import matplotlib.pyplot as plt
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.optimizers.legacy import SGD
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, GlobalAveragePooling2D, BatchNormalization
 from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import to_categorical
 from skimage.feature.texture import graycomatrix, graycoprops
 from skimage.color import rgb2gray
+from tensorflow.keras.applications import VGG16
 
 def preprocess_image(image_path):
     img = cv2.imread(image_path)
@@ -18,13 +21,12 @@ def preprocess_image(image_path):
     img = img / 255.0  # Normalize pixel values
     return img
 
-
 if __name__ == "__main__":
     # Paths
     data_dir = "Kather_texture_2016_image_tiles_5000"
     classes = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
 
-
+    """
     # Visualize some images
     for category in classes:
         folder = os.path.join(data_dir, category)
@@ -34,7 +36,7 @@ if __name__ == "__main__":
             plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             plt.title(category)
             plt.show()
-
+    """
     # Data Preprocessing
 
     X = []
@@ -53,56 +55,52 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     y_train = to_categorical(y_train, num_classes=len(classes))
     y_test = to_categorical(y_test, num_classes=len(classes))
-    #Testing combination: Filters1=64, Filters2=64, Dense=128, Dropout1=0.3, Dropout2=0.3, Batch Size=32
-    #Best Hyperparameters: {'filters_1': 64, 'filters_2': 128, 'dense_units': 128, 'dropout_1': 0.3, 'dropout_2': 0.3, 'batch_size': 32}
 
-    model1 = Sequential([
-    Conv2D(32, (3, 3), activation='relu', input_shape=(150, 150, 3)),
-    MaxPooling2D((2, 2)),
-    Conv2D(64, (3, 3), activation='relu'),
-    MaxPooling2D((2, 2)),
-    Conv2D(128, (3, 3), activation='relu'),
-    MaxPooling2D((2, 2)),
-    Flatten(),
-    Dense(256, activation='relu'),
-    Dropout(0.5),
-    Dense(len(classes), activation='softmax')])
+    # Load pre-trained VGG16 model + higher level layers
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(150, 150, 3))
+    base_model.trainable = False  # Freeze the base model
+    for layer in base_model.layers[:-4]:  # Freeze all layers except the last 4
+        layer.trainable = False
 
-    model = Sequential([
-    # First Convolutional Block
-    Conv2D(64, (3, 3), activation='relu', input_shape=(150, 150, 3)),
-    MaxPooling2D((2, 2)),
+    # Custom top layers
+    x = base_model.output
+    x = GlobalAveragePooling2D()(x)
+    x = Dense(128, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.4)(x)
+    predictions = Dense(len(classes), activation='softmax')(x)
 
-    # Second Convolutional Block
-    Conv2D(128, (3, 3), activation='relu'),
-    MaxPooling2D((2, 2)),
+    model = Model(inputs=base_model.input, outputs=predictions)
 
-    # Third Convolutional Block
-    Conv2D(128, (3, 3), activation='relu'),
-    MaxPooling2D((2, 2)),
+    model.compile(
+        optimizer=SGD(learning_rate=0.001, momentum=0.9),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
 
-    # Fully Connected Layers
-    Flatten(),
-    Dense(128, activation='relu'),
-    Dropout(0.3),
-    Dense(len(classes), activation='softmax')
-])
-
-
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
+    # Image data generator with enhanced augmentation
     datagen = ImageDataGenerator(
-    rotation_range=20,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    horizontal_flip=True
+        rotation_range=30,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.2,
+        zoom_range=0.2,
+        horizontal_flip=True,
+        fill_mode='nearest'
     )
 
     datagen.fit(X_train)
 
-    history = model.fit(datagen.flow(X_train, y_train, batch_size=32),
-                        validation_data=(X_test, y_test),
-                        epochs=30)
+    # Callbacks for optimization
+    early_stopping = EarlyStopping(monitor='val_accuracy', patience=5, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-5)
+
+    history = model.fit(
+        datagen.flow(X_train, y_train, batch_size=32),
+        validation_data=(X_test, y_test),
+        epochs=50,
+        callbacks=[early_stopping, reduce_lr]
+    )
 
     y_pred = np.argmax(model.predict(X_test), axis=1)
     y_true = np.argmax(y_test, axis=1)
